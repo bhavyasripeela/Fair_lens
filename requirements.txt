@@ -1,4 +1,7 @@
 streamlit
 pandas
-plotly
-Supabase
+numpy
+matplotlib
+supabase
+python-dotenv
+scikit-learn
