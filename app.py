@@ -278,6 +278,84 @@ if binary_outcome is not None and group_col in df.columns:
         st.success("🎉 Overall: No major bias detected. The model appears to be fair across groups.")
     else:
         st.error("🚨 Overall: Bias detected. Review your training data and model pipeline before deployment.")
+    
+    # ─── Step 6: AI Explanation ───────────────────────────────────────────────
+    st.divider()
+    st.markdown('<div class="section-header">Step 6 — 🤖 AI-Powered Human Insight</div>', unsafe_allow_html=True)
+    st.caption("Click below to get a plain-English explanation of your results, what caused the bias, and how to fix it.")
+ 
+    if st.button("✨ Generate AI Explanation", use_container_width=True):
+ 
+        group_breakdown = "\n".join(
+            [f"  - {g}: {outcome_rates[g]:.1f}% {outcome_label.lower()}" for g in outcome_rates.index]
+        )
+        rep_breakdown = "\n".join(
+            [f"  - {g}: {percentages.get(g, 0):.1f}% of dataset" for g in outcome_rates.index]
+        )
+        verdict_text = (
+            "FAIR — no major bias detected"
+            if passes_dir and passes_parity
+            else "BIASED — significant disparity found"
+        )
+ 
+        prompt = f"""You are FairLens AI, a friendly expert in algorithmic fairness and responsible AI.
+ 
+A user just completed a bias audit on their dataset. Here are the full results:
+ 
+Domain: {domain}
+Sensitive Attribute: {group_col}
+Outcome Column: {outcome_col} ({outcome_label})
+ 
+Group Outcome Rates:
+{group_breakdown}
+ 
+Group Representation in Dataset:
+{rep_breakdown}
+ 
+Fairness Metrics:
+- Disparate Impact Ratio: {dir_score:.2f} ({'PASSES' if passes_dir else 'FAILS'} — threshold >= 0.80)
+- Statistical Parity Gap: {parity_diff:.1f}% ({'WITHIN' if passes_parity else 'EXCEEDS'} acceptable range — threshold <= 10%)
+- Most favored group: {outcome_rates.idxmax()} at {max_rate:.1f}%
+- Least favored group: {outcome_rates.idxmin()} at {min_rate:.1f}%
+- Overall verdict: {verdict_text}
+ 
+Write 4 to 6 paragraphs in warm, plain English that covers:
+1. What these numbers mean to someone unfamiliar with AI fairness — make it relatable
+2. Which group is disadvantaged and by how much, using a real-world analogy
+3. What likely caused this bias — such as historical data patterns, underrepresentation, proxy variables, or feedback loops
+4. Clear, practical steps the developer or organization can take right now to reduce or fix this bias
+5. Why it matters ethically and legally to get this right before deploying the model
+ 
+Be conversational, empathetic, and specific to the numbers above. Write in flowing paragraphs, not bullet points."""
+ 
+        try:
+            with st.spinner("🧠 Generating insight — this may take a few seconds..."):
+                response = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "model": "claude-sonnet-4-20250514",
+                        "max_tokens": 1000,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                    timeout=60,
+                )
+                result = response.json()
+ 
+            if "content" in result and len(result["content"]) > 0:
+                explanation = result["content"][0]["text"]
+                st.markdown(
+                    f'<div class="insight-box">{explanation}</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.error("❌ Unexpected response from AI. Please try again.")
+                st.json(result)
+ 
+        except requests.exceptions.Timeout:
+            st.error("❌ Request timed out. Please try again.")
+        except Exception as e:
+            st.error(f"❌ Could not connect to AI service: {e}")    
 
 else:
     st.warning(
@@ -302,5 +380,6 @@ st.divider()
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.caption("FairLens AI · Built for AI/ML Hackathon 2025 · Bhavya Sri · Ruchitha · Tulasi Priya · Vaishnavi")
+
 
 
