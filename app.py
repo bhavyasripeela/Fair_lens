@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
+import numpy as np
+import io
 
 # ─── Page Config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -10,6 +12,32 @@ st.set_page_config(
     page_icon="🧠",
     layout="wide"
 )
+if "df" not in st.session_state:
+    st.session_state["df"] = None
+
+# ─── Helper: Reusable Bar Chart ───────────────────────────────────────────────
+def make_bar_chart(rates, title, y_label, color_seq=None):
+    """Return a Plotly bar chart figure for group outcome rates."""
+    if color_seq is None:
+        color_seq = px.colors.qualitative.Pastel
+    fig = px.bar(
+        x=rates.index,
+        y=rates.values,
+        labels={"x": "", "y": y_label},
+        title=title,
+        color=rates.index,
+        color_discrete_sequence=color_seq,
+        text=[f"{v:.1f}%" for v in rates.values],
+    )
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        showlegend=False,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(range=[0, min(rates.max() * 1.4, 105)]),
+        margin=dict(t=50, b=20, l=20, r=20),
+    )
+    return fig
 
 # ─── Custom CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
@@ -102,17 +130,18 @@ uploaded_file = st.file_uploader(
     label_visibility="collapsed"
 )
 
-if uploaded_file is None:
+if uploaded_file is not None:
+    try:
+        st.session_state["df"] = pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error(f"❌ Error reading file: {e}")
+        st.stop()
+
+if st.session_state["df"] is None:
     st.info("⬆️ Please upload a CSV file to begin the fairness analysis.")
     st.stop()
 
-# ─── Load Data ────────────────────────────────────────────────────────────────
-try:
-    df = pd.read_csv(uploaded_file)
-except Exception as e:
-    st.error(f"❌ Error reading file: {e}")
-    st.stop()
-
+df = st.session_state["df"]
 st.success(f"✅ File uploaded successfully — {df.shape[0]} rows × {df.shape[1]} columns")
 
 with st.expander("📋 Preview Dataset", expanded=False):
@@ -344,34 +373,89 @@ Write 4 to 6 paragraphs in warm, plain English that covers:
  
 Be conversational, empathetic, and specific to the numbers above. Write in flowing paragraphs, not bullet points."""
  
-        try:
-            with st.spinner("🧠 Generating insight — this may take a few seconds..."):
-                response = requests.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={"Content-Type": "application/json"},
-                    json={
-                        "model": "claude-sonnet-4-20250514",
-                        "max_tokens": 1000,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                    timeout=60,
+        with st.spinner("🧠 Generating insight..."):
+            # ── Template-based AI explanation using actual metrics ─────────────
+            verdict_str = "no major bias" if passes_dir and passes_parity else "significant bias"
+            top_g = outcome_rates.idxmax()
+            low_g = outcome_rates.idxmin()
+            top_rate = outcome_rates.max()
+            low_rate = outcome_rates.min()
+
+            if passes_dir and passes_parity:
+                para1 = (
+                    f"Great news — your **{domain}** model shows **{verdict_str}** across the **{group_col}** groups "
+                    f"it was tested on. The Disparate Impact Ratio of **{dir_score:.2f}** comfortably exceeds the "
+                    f"legal threshold of 0.80, and the outcome gap of **{parity_diff:.1f}%** falls within the "
+                    f"acceptable 10% range. In plain terms: the model treats different groups similarly."
                 )
-                result = response.json()
- 
-            if "content" in result and len(result["content"]) > 0:
-                explanation = result["content"][0]["text"]
-                st.markdown(
-                    f'<div class="insight-box">{explanation}</div>',
-                    unsafe_allow_html=True
+                para2 = (
+                    f"The **{top_g}** group achieved a {outcome_label.lower()} of **{top_rate:.1f}%**, "
+                    f"while **{low_g}** achieved **{low_rate:.1f}%** — a modest gap of {parity_diff:.1f} percentage points. "
+                    f"Think of it like two students who both passed an exam with similar scores: the system is "
+                    f"treating them fairly."
+                )
+                para3 = (
+                    "Even when a model passes fairness tests, it's worth monitoring over time. "
+                    "Fairness can shift as data distributions change, new groups emerge, or the model is "
+                    "applied to populations it wasn't trained on. Schedule periodic re-audits, especially "
+                    "if your data or user base changes significantly."
+                )
+                para4 = (
+                    "To maintain this fairness, document your current metrics as a baseline, ensure future "
+                    "training data is collected with balanced representation, and consider adding fairness "
+                    "constraints to your retraining pipeline. A fair model today can become biased tomorrow "
+                    "if data practices aren't sustained."
                 )
             else:
-                st.error("❌ Unexpected response from AI. Please try again.")
-                st.json(result)
- 
-        except requests.exceptions.Timeout:
-            st.error("❌ Request timed out. Please try again.")
-        except Exception as e:
-            st.error(f"❌ Could not connect to AI service: {e}")
+                para1 = (
+                    f"Your **{domain}** model shows **{verdict_str}** across the **{group_col}** attribute. "
+                    f"The Disparate Impact Ratio is **{dir_score:.2f}** "
+                    f"({'above' if passes_dir else 'below'} the 0.80 legal threshold), and the "
+                    f"Statistical Parity Gap is **{parity_diff:.1f}%** "
+                    f"({'within' if passes_parity else 'exceeding'} the acceptable 10% range). "
+                    f"In plain terms: the model produces meaningfully different outcomes depending on which group a person belongs to."
+                )
+                para2 = (
+                    f"Specifically, **{top_g}** achieves a {outcome_label.lower()} of **{top_rate:.1f}%**, "
+                    f"while **{low_g}** only achieves **{low_rate:.1f}%** — a gap of {parity_diff:.1f} percentage points. "
+                    f"Imagine two equally qualified job applicants: one from **{top_g}** and one from **{low_g}**. "
+                    f"Based on this model, the **{top_g}** applicant is significantly more likely to receive a positive outcome — "
+                    f"not because they're more qualified, but because of how the model was trained."
+                )
+                para3 = (
+                    f"This kind of disparity often traces back to **historical patterns in training data**. "
+                    f"If past decisions already favoured **{top_g}** — due to societal biases, limited "
+                    f"representation, or proxy variables that correlate with {group_col} — the model simply "
+                    f"learns and reinforces those patterns. Underrepresentation of **{low_g}** in training data "
+                    f"is another likely cause: the model has seen fewer examples of this group, leading to "
+                    f"less accurate and less favourable predictions."
+                )
+                para4 = (
+                    "**To fix this**, consider the bias correction techniques in Step 7 below. Reweighing adjusts "
+                    "sample importance during training so no group dominates the signal. Oversampling gives "
+                    "underrepresented groups a stronger voice. Threshold Adjustment sets group-specific decision "
+                    "cutoffs so outcomes are equalised. Beyond these, you should also revisit your feature "
+                    "engineering — remove or transform features that act as proxies for the sensitive attribute."
+                )
+                para5 = (
+                    f"**Why this matters:** Deploying a biased model in **{domain.lower()}** decisions can have serious "
+                    f"real-world consequences for **{low_g}** individuals — lost opportunities, reinforced inequality, "
+                    f"and potential legal liability under anti-discrimination laws (such as the EU AI Act, EEOC "
+                    f"guidelines, or the Fair Credit Reporting Act, depending on your jurisdiction). "
+                    f"Fixing bias before deployment is far cheaper — financially and ethically — than addressing "
+                    f"harm after the fact."
+                )
+
+            explanation_parts = [para1, para2, para3, para4]
+            if not (passes_dir and passes_parity):
+                explanation_parts.append(para5)
+
+            explanation = "\n\n".join(explanation_parts)
+
+        st.markdown(
+            f'<div class="insight-box">{explanation}</div>',
+            unsafe_allow_html=True
+        )
     st.divider()
     st.markdown('<div class="section-header">Step 7 — 🔧 Fix Bias + Visual Comparison</div>', unsafe_allow_html=True)
     st.caption("Choose a bias correction technique below. FairLens will apply it and show you a Before vs After comparison.")
@@ -637,6 +721,8 @@ st.divider()
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.caption("FairLens AI · Built for SusHacks Hackathon 2026 · Bhavya Sri · Ruchitha · Tulasi Priya · Vaishnavi")
+
+
 
 
 
