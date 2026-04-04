@@ -224,18 +224,36 @@ outcome_label = DOMAIN_CONFIG[domain]["outcome_label"]
 
 # Detect binary outcome column
 def to_binary(series):
-    """Convert yes/no, 1/0, true/false column to numeric 0-1."""
+    """Auto-detect binary columns regardless of exact labels used."""
     if pd.api.types.is_numeric_dtype(series):
         unique_vals = series.dropna().unique()
         if set(unique_vals).issubset({0, 1}):
             return series.astype(float)
         return None
-    str_series = series.str.lower().str.strip()
-    yes_vals = {"yes", "1", "true", "approved", "selected", "admitted", "accept", "pass"}
-    if str_series.isin(yes_vals | {"no", "0", "false", "rejected", "not selected", "denied", "fail"}).all():
-        return str_series.isin(yes_vals).astype(float)
-    return None
 
+    # Normalize to lowercase strings
+    str_series = series.astype(str).str.lower().str.strip()
+    unique_vals = str_series.dropna().unique()
+
+    # Only works if exactly 2 unique values exist
+    if len(unique_vals) != 2:
+        return None
+
+    # Sort so we can pick the "positive" one smartly
+    known_positive = {"yes", "y", "1", "true", "approved", "selected",
+                      "admitted", "accept", "pass", "positive", "granted", "success"}
+
+    val_a, val_b = unique_vals[0], unique_vals[1]
+
+    if val_a in known_positive:
+        positive_label = val_a
+    elif val_b in known_positive:
+        positive_label = val_b
+    else:
+        # Neither matches known list — assume alphabetically last is positive
+        positive_label = sorted([val_a, val_b])[-1]
+
+    return (str_series == positive_label).astype(float)
 binary_outcome = to_binary(df[outcome_col]) if outcome_col in df.columns else None
 
 if binary_outcome is not None and group_col in df.columns:
@@ -721,6 +739,8 @@ st.divider()
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.caption("FairLens AI · Built for SusHacks Hackathon 2026 · Bhavya Sri · Ruchitha · Tulasi Priya · Vaishnavi")
+
+
 
 
 
