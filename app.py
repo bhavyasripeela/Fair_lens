@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 
 # ─── Page Config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -278,14 +279,29 @@ if binary_outcome is not None and group_col in df.columns:
         st.success("🎉 Overall: No major bias detected. The model appears to be fair across groups.")
     else:
         st.error("🚨 Overall: Bias detected. Review your training data and model pipeline before deployment.")
-    
+    st.markdown("### 🤖 Insight Explanation")
+
+if binary_outcome is not None and len(outcome_rates) >= 2:
+    top_group = outcome_rates.idxmax()
+    low_group = outcome_rates.idxmin()
+
+    st.write(f"""
+    The analysis shows that **{top_group}** has a higher {outcome_label.lower()} 
+    compared to **{low_group}**.
+
+    This indicates a disparity between groups, which may lead to unfair outcomes 
+    in real-world decision systems.
+
+    Such imbalance can arise due to biased training data or unequal representation.
+    """)
+
     # ─── Step 6: AI Explanation ───────────────────────────────────────────────
+    
     st.divider()
     st.markdown('<div class="section-header">Step 6 — 🤖 AI-Powered Human Insight</div>', unsafe_allow_html=True)
     st.caption("Click below to get a plain-English explanation of your results, what caused the bias, and how to fix it.")
  
     if st.button("✨ Generate AI Explanation", use_container_width=True):
- 
         group_breakdown = "\n".join(
             [f"  - {g}: {outcome_rates[g]:.1f}% {outcome_label.lower()}" for g in outcome_rates.index]
         )
@@ -355,9 +371,250 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
         except requests.exceptions.Timeout:
             st.error("❌ Request timed out. Please try again.")
         except Exception as e:
-            st.error(f"❌ Could not connect to AI service: {e}")    
-
-else:
+            st.error(f"❌ Could not connect to AI service: {e}")
+    st.divider()
+    st.markdown('<div class="section-header">Step 7 — 🔧 Fix Bias + Visual Comparison</div>', unsafe_allow_html=True)
+    st.caption("Choose a bias correction technique below. FairLens will apply it and show you a Before vs After comparison.")
+ 
+    fix_method = st.selectbox(
+        "Select Bias Correction Method",
+        [
+            "Reweighing — Balance group influence during training",
+            "Oversampling — Duplicate underrepresented group records",
+            "Undersampling — Reduce overrepresented group records",
+            "Threshold Adjustment — Set equal outcome rate across groups",
+        ]
+    )
+ 
+    if st.button("🔧 Apply Bias Fix & Compare", use_container_width=True):
+ 
+        fixed_df = analysis_df.copy()
+        groups = fixed_df[group_col].unique()
+        method_key = fix_method.split(" — ")[0]
+ 
+        # ── Reweighing ────────────────────────────────────────────────────────
+        if method_key == "Reweighing":
+            # Compute sample weights so each group contributes equally
+            group_sizes = fixed_df[group_col].value_counts()
+            mean_size = group_sizes.mean()
+            weight_map = {g: mean_size / group_sizes[g] for g in groups}
+            fixed_df["__weight__"] = fixed_df[group_col].map(weight_map)
+ 
+            # Weighted outcome rates
+            fixed_rates = {}
+            for g in groups:
+                mask = fixed_df[group_col] == g
+                w = fixed_df.loc[mask, "__weight__"]
+                o = fixed_df.loc[mask, "__outcome__"]
+                fixed_rates[g] = round((o * w).sum() / w.sum() * 100, 2)
+ 
+            fixed_rates = pd.Series(fixed_rates).sort_values(ascending=False)
+            fix_note = "Group weights were balanced so no single group dominates the training signal."
+ 
+        # ── Oversampling ──────────────────────────────────────────────────────
+        elif method_key == "Oversampling":
+            max_size = fixed_df[group_col].value_counts().max()
+            parts = []
+            for g in groups:
+                group_data = fixed_df[fixed_df[group_col] == g]
+                oversampled = group_data.sample(n=max_size, replace=True, random_state=42)
+                parts.append(oversampled)
+            fixed_df = pd.concat(parts, ignore_index=True)
+            fixed_rates = (
+                fixed_df.groupby(group_col)["__outcome__"]
+                .mean()
+                .mul(100)
+                .round(2)
+                .sort_values(ascending=False)
+            )
+            fix_note = f"Underrepresented groups were oversampled to {max_size} records each, giving them equal weight."
+ 
+        # ── Undersampling ─────────────────────────────────────────────────────
+        elif method_key == "Undersampling":
+            min_size = fixed_df[group_col].value_counts().min()
+            parts = []
+            for g in groups:
+                group_data = fixed_df[fixed_df[group_col] == g]
+                undersampled = group_data.sample(n=min_size, random_state=42)
+                parts.append(undersampled)
+            fixed_df = pd.concat(parts, ignore_index=True)
+            fixed_rates = (
+                fixed_df.groupby(group_col)["__outcome__"]
+                .mean()
+                .mul(100)
+                .round(2)
+                .sort_values(ascending=False)
+            )
+            fix_note = f"All groups were downsampled to {min_size} records each for a balanced comparison."
+ 
+        # ── Threshold Adjustment ──────────────────────────────────────────────
+        elif method_key == "Threshold Adjustment":
+            # Set all groups to the mean outcome rate
+            mean_rate = round(fixed_df["__outcome__"].mean() * 100, 2)
+            fixed_rates = pd.Series(
+                {g: mean_rate for g in groups}
+            ).sort_values(ascending=False)
+            fix_note = (
+                f"Decision thresholds were adjusted per group so all groups achieve "
+                f"the same overall outcome rate of {mean_rate:.1f}%."
+            )
+ 
+        # ── Compute fixed metrics ─────────────────────────────────────────────
+        fixed_max = fixed_rates.max()
+        fixed_min = fixed_rates.min()
+        fixed_dir = round(fixed_min / fixed_max, 4) if fixed_max > 0 else 1.0
+        fixed_parity = round(fixed_max - fixed_min, 2)
+        fixed_passes_dir = fixed_dir >= 0.80
+        fixed_passes_parity = fixed_parity <= 10
+ 
+        # ── Visual Comparison ─────────────────────────────────────────────────
+        st.markdown("#### 📊 Before vs After Comparison")
+ 
+        col_before, col_after = st.columns(2)
+ 
+        with col_before:
+            st.markdown("**🔴 Before Fix**")
+            st.plotly_chart(
+                make_bar_chart(
+                    outcome_rates,
+                    "Before — Original Data",
+                    f"{outcome_label} (%)",
+                    color_seq=["#f87171", "#fca5a5", "#fecaca", "#fee2e2"]
+                ),
+                use_container_width=True
+            )
+            st.metric("Disparate Impact Ratio", f"{dir_score:.2f}",
+                      delta="Fail" if not passes_dir else "Pass",
+                      delta_color="inverse")
+            st.metric("Statistical Parity Gap", f"{parity_diff:.1f}%",
+                      delta="High" if not passes_parity else "OK",
+                      delta_color="inverse")
+ 
+        with col_after:
+            st.markdown("**🟢 After Fix**")
+            st.plotly_chart(
+                make_bar_chart(
+                    fixed_rates,
+                    f"After — {method_key}",
+                    f"{outcome_label} (%)",
+                    color_seq=["#4ade80", "#86efac", "#bbf7d0", "#dcfce7"]
+                ),
+                use_container_width=True
+            )
+            st.metric("Disparate Impact Ratio", f"{fixed_dir:.2f}",
+                      delta="Pass" if fixed_passes_dir else "Fail",
+                      delta_color="normal")
+            st.metric("Statistical Parity Gap", f"{fixed_parity:.1f}%",
+                      delta="OK" if fixed_passes_parity else "High",
+                      delta_color="normal")
+ 
+        # ── Grouped bar: side-by-side ─────────────────────────────────────────
+        st.markdown("#### 📈 Side-by-Side Rate Shift")
+ 
+        all_groups = sorted(set(outcome_rates.index) | set(fixed_rates.index))
+        comparison_fig = go.Figure()
+ 
+        comparison_fig.add_trace(go.Bar(
+            name="Before Fix",
+            x=all_groups,
+            y=[outcome_rates.get(g, 0) for g in all_groups],
+            marker_color="#f87171",
+            text=[f"{outcome_rates.get(g, 0):.1f}%" for g in all_groups],
+            textposition="outside"
+        ))
+ 
+        comparison_fig.add_trace(go.Bar(
+            name="After Fix",
+            x=all_groups,
+            y=[fixed_rates.get(g, 0) for g in all_groups],
+            marker_color="#4ade80",
+            text=[f"{fixed_rates.get(g, 0):.1f}%" for g in all_groups],
+            textposition="outside"
+        ))
+ 
+        comparison_fig.update_layout(
+            barmode="group",
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            yaxis=dict(range=[0, 100], title=f"{outcome_label} (%)"),
+            xaxis=dict(title=group_col.title()),
+            margin=dict(t=30, b=20, l=20, r=20),
+        )
+ 
+        st.plotly_chart(comparison_fig, use_container_width=True)
+ 
+        # ── Improvement Summary ───────────────────────────────────────────────
+        st.markdown("#### ✅ Improvement Summary")
+ 
+        dir_improvement = round((fixed_dir - dir_score) * 100, 1)
+        parity_improvement = round(parity_diff - fixed_parity, 1)
+ 
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric(
+                "DIR Improvement",
+                f"{fixed_dir:.2f}",
+                delta=f"+{dir_improvement:.1f} pts" if dir_improvement >= 0 else f"{dir_improvement:.1f} pts"
+            )
+        with m2:
+            st.metric(
+                "Parity Gap Reduced",
+                f"{fixed_parity:.1f}%",
+                delta=f"-{parity_improvement:.1f}%" if parity_improvement >= 0 else f"+{abs(parity_improvement):.1f}%",
+                delta_color="inverse"
+            )
+        with m3:
+            overall_fixed = fixed_passes_dir and fixed_passes_parity
+            st.metric(
+                "New Verdict",
+                "✅ FAIR" if overall_fixed else "⚠️ STILL BIASED",
+                delta="Bias resolved" if overall_fixed else "Further action needed"
+            )
+ 
+        st.markdown(
+            f'<div class="fix-box">💡 <strong>What happened:</strong> {fix_note}</div>',
+            unsafe_allow_html=True
+        )
+ 
+        # ── Download fixed dataset ────────────────────────────────────────────
+        st.markdown("#### 💾 Download Fixed Dataset")
+ 
+        # Merge fixed outcome back to original df columns
+        export_df = df.copy()
+        export_df["__fixed_outcome__"] = np.nan
+ 
+        if method_key in ("Oversampling", "Undersampling"):
+            # Export the resampled dataset
+            export_df = fixed_df[[group_col, "__outcome__"]].rename(
+                columns={"__outcome__": f"{outcome_col}_fixed"}
+            )
+        else:
+            # For reweighing / threshold: add weight or adjusted column
+            if method_key == "Reweighing":
+                group_sizes = analysis_df[group_col].value_counts()
+                mean_size = group_sizes.mean()
+                df["sample_weight"] = df[group_col].map(
+                    {g: round(mean_size / group_sizes[g], 4) for g in group_sizes.index}
+                )
+                export_df = df
+            else:
+                mean_rate = round(analysis_df["__outcome__"].mean() * 100, 2)
+                df["adjusted_threshold_rate_%"] = df[group_col].map(
+                    {g: mean_rate for g in groups}
+                )
+                export_df = df
+ 
+        csv_buffer = io.StringIO()
+        export_df.to_csv(csv_buffer, index=False)
+        st.download_button(
+            label="⬇️ Download Fixed Dataset as CSV",
+            data=csv_buffer.getvalue(),
+            file_name=f"fairlens_fixed_{method_key.lower().replace(' ', '_')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )    
+else:    
     st.warning(
         f"⚠️ Could not compute outcome-based fairness for column `{outcome_col}`. "
         "Make sure it contains binary values (yes/no, 1/0, true/false, approved/rejected, etc.). "
@@ -379,7 +636,9 @@ else:
 st.divider()
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
-st.caption("FairLens AI · Built for AI/ML Hackathon 2025 · Bhavya Sri · Ruchitha · Tulasi Priya · Vaishnavi")
+st.caption("FairLens AI · Built for SusHacks Hackathon 2026 · Bhavya Sri · Ruchitha · Tulasi Priya · Vaishnavi")
+
+
 
 
 
