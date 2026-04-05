@@ -6,12 +6,13 @@ import requests
 import numpy as np
 import io
 import os
+from supabase_config import supabase
 
 # Base directory — same folder as this script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-
+# ─── Page Config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="FairLens AI",
     page_icon="🧠",
@@ -20,7 +21,7 @@ st.set_page_config(
 if "df" not in st.session_state:
     st.session_state["df"] = None
 
-
+# ─── Helper: Reusable Bar Chart ───────────────────────────────────────────────
 def make_bar_chart(rates, title, y_label, color_seq=None):
     """Return a Plotly bar chart figure for group outcome rates."""
     if color_seq is None:
@@ -44,7 +45,7 @@ def make_bar_chart(rates, title, y_label, color_seq=None):
     )
     return fig
 
-
+# ─── Custom CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
     <style>
         .main-title {
@@ -77,12 +78,54 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-
+# ─── Header ───────────────────────────────────────────────────────────────────
 st.markdown('<div class="main-title">🧠 FairLens AI</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">AI Fairness Auditor — Detect · Explain · Fix Bias in AI Systems</div>', unsafe_allow_html=True)
 st.divider()
 
+# ─── Auth Gate ────────────────────────────────────────────────────────────────
+if "user" not in st.session_state:
+    st.session_state["user"] = None
 
+if st.session_state["user"] is None:
+    st.markdown('<div class="section-header">🔐 Sign in to continue</div>', unsafe_allow_html=True)
+    auth_tab_login, auth_tab_signup = st.tabs(["Login", "Sign Up"])
+
+    with auth_tab_login:
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
+        if st.button("Login", use_container_width=True):
+            try:
+                res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                st.session_state["user"] = res.user
+                st.success(f"✅ Welcome back, {email}!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Login failed: {e}")
+
+    with auth_tab_signup:
+        email = st.text_input("Email", key="signup_email")
+        password = st.text_input("Password", type="password", key="signup_password")
+        if st.button("Create Account", use_container_width=True):
+            try:
+                res = supabase.auth.sign_up({"email": email, "password": password})
+                st.success("✅ Account created! Check your email to confirm, then log in.")
+            except Exception as e:
+                st.error(f"❌ Sign up failed: {e}")
+
+    st.stop()  # Block rest of app until logged in
+
+# Logout button in sidebar
+with st.sidebar:
+    user = st.session_state.get("user")
+    if user:
+        st.markdown(f"👤 **{user.email}**")
+        if st.button("Logout"):
+            
+            supabase.auth.sign_out()
+            st.session_state["user"] = None
+            st.rerun()
+# ─── Domain Selection ─────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">Step 1 — Select Application Domain</div>', unsafe_allow_html=True)
 
 DOMAIN_CONFIG = {
@@ -128,7 +171,7 @@ st.divider()
 st.info(" You can either upload your dataset or try our sample datasets.")
 
 
-
+# ─── File Upload ──────────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">Step 2 — Load Your Dataset</div>', unsafe_allow_html=True)
 
 tab_upload, tab_sample = st.tabs(["📁 Upload Your Own CSV", "🗂️ Use Sample Dataset"])
@@ -146,7 +189,16 @@ with tab_upload:
         except Exception as e:
             st.error(f"❌ Error reading file: {e}")
             st.stop()
+if uploaded_file is not None:
 
+    file_bytes = uploaded_file.read()
+
+    supabase.storage.from_("datasets").upload(
+        f"{uploaded_file.name}",
+        file_bytes
+    )
+
+    st.success("Dataset uploaded to Supabase Storage")
 with tab_sample:
     SAMPLE_FILES = {
         "Biased Hiring Data":  os.path.join(BASE_DIR, "biased_recruitment_data.csv"),
@@ -181,7 +233,7 @@ with st.expander("📋 Preview Dataset", expanded=False):
 
 st.divider()
 
-
+# ─── Column Selection ─────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">Step 3 — Select Column for Bias Detection</div>', unsafe_allow_html=True)
 
 categorical_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
@@ -208,7 +260,7 @@ with col_b:
 
 st.divider()
 
-
+# ─── Distribution Analysis ────────────────────────────────────────────────────
 st.markdown('<div class="section-header">Step 4 — Distribution Analysis</div>', unsafe_allow_html=True)
 
 value_counts = df[group_col].value_counts()
@@ -249,12 +301,12 @@ with col_stats:
 
 st.divider()
 
-
+# ─── Fairness Analysis ────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">Step 5 — Fairness Analysis</div>', unsafe_allow_html=True)
 
 outcome_label = DOMAIN_CONFIG[domain]["outcome_label"]
 
-
+# Detect binary outcome column
 def to_binary(series):
     """Auto-detect binary columns regardless of exact labels used."""
     if pd.api.types.is_numeric_dtype(series):
@@ -263,15 +315,15 @@ def to_binary(series):
             return series.astype(float)
         return None
 
-   
+    # Normalize to lowercase strings
     str_series = series.astype(str).str.lower().str.strip()
     unique_vals = str_series.dropna().unique()
 
-    
+    # Only works if exactly 2 unique values exist
     if len(unique_vals) != 2:
         return None
 
-    
+    # Sort so we can pick the "positive" one smartly
     known_positive = {"yes", "y", "1", "true", "approved", "selected",
                       "admitted", "accept", "pass", "positive", "granted", "success"}
 
@@ -327,6 +379,8 @@ if binary_outcome is not None and group_col in df.columns:
         min_rate = outcome_rates.min()
         dir_score = round(min_rate / max_rate, 4) if max_rate > 0 else 1.0
         parity_diff = round(max_rate - min_rate, 2)
+        passes_dir = dir_score >= 0.80
+        passes_parity = parity_diff <= 10
 
         st.markdown("**Fairness Metrics**")
         st.metric("Disparate Impact Ratio", f"{dir_score:.2f}", delta="≥ 0.80 is fair")
@@ -334,7 +388,22 @@ if binary_outcome is not None and group_col in df.columns:
         st.metric("Highest Rate", f"{max_rate:.1f}%")
         st.metric("Lowest Rate", f"{min_rate:.1f}%")
 
-   
+    if st.button("Save Analysis to Supabase"):
+        user_email = st.session_state["user"].email if st.session_state.get("user") else "Guest"
+        data = {
+            "user_name": user_email,
+            "domain": domain,
+            "group_column": group_col,
+            "outcome_column": outcome_col,
+            "fairness_score": float(dir_score),
+            "verdict": "FAIR" if passes_dir and passes_parity else "BIASED"
+        }
+
+        response = supabase.table("datasets").insert(data).execute()
+
+        st.success("Saved successfully to Supabase!")
+
+    # ─── Verdict ──────────────────────────────────────────────────────────────
     st.markdown("#### 🧾 Fairness Verdict")
 
     passes_dir = dir_score >= 0.80
@@ -358,6 +427,7 @@ if binary_outcome is not None and group_col in df.columns:
         st.success("🎉 Overall: No major bias detected. The model appears to be fair across groups.")
     else:
         st.error("🚨 Overall: Bias detected. Review your training data and model pipeline before deployment.")
+    
     st.markdown("### 🤖 Insight Explanation")
 
 if binary_outcome is not None and len(outcome_rates) >= 2:
@@ -374,7 +444,7 @@ if binary_outcome is not None and len(outcome_rates) >= 2:
     Such imbalance can arise due to biased training data or unequal representation.
     """)
 
-    
+    # ─── Step 6: AI Explanation ───────────────────────────────────────────────
     
     st.divider()
     st.markdown('<div class="section-header">Step 6 — 🤖 AI-Powered Human Insight</div>', unsafe_allow_html=True)
@@ -424,7 +494,7 @@ Write 4 to 6 paragraphs in warm, plain English that covers:
 Be conversational, empathetic, and specific to the numbers above. Write in flowing paragraphs, not bullet points."""
  
         with st.spinner("🧠 Generating insight..."):
-           
+            # ── Template-based AI explanation using actual metrics ─────────────
             verdict_str = "no major bias" if passes_dir and passes_parity else "significant bias"
             top_g = outcome_rates.idxmax()
             low_g = outcome_rates.idxmin()
@@ -526,7 +596,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
         groups = fixed_df[group_col].unique()
         method_key = fix_method.split(" — ")[0]
  
-        
+        # ── Reweighing ────────────────────────────────────────────────────────
         if method_key == "Reweighing":
             # Compute sample weights so each group contributes equally
             group_sizes = fixed_df[group_col].value_counts()
@@ -534,7 +604,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
             weight_map = {g: mean_size / group_sizes[g] for g in groups}
             fixed_df["__weight__"] = fixed_df[group_col].map(weight_map)
  
-            
+            # Weighted outcome rates
             fixed_rates = {}
             for g in groups:
                 mask = fixed_df[group_col] == g
@@ -545,7 +615,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
             fixed_rates = pd.Series(fixed_rates).sort_values(ascending=False)
             fix_note = "Group weights were balanced so no single group dominates the training signal."
  
-        
+        # ── Oversampling ──────────────────────────────────────────────────────
         elif method_key == "Oversampling":
             max_size = fixed_df[group_col].value_counts().max()
             parts = []
@@ -563,7 +633,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
             )
             fix_note = f"Underrepresented groups were oversampled to {max_size} records each, giving them equal weight."
  
-        
+        # ── Undersampling ─────────────────────────────────────────────────────
         elif method_key == "Undersampling":
             min_size = fixed_df[group_col].value_counts().min()
             parts = []
@@ -581,6 +651,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
             )
             fix_note = f"All groups were downsampled to {min_size} records each for a balanced comparison."
  
+        # ── Threshold Adjustment ──────────────────────────────────────────────
         elif method_key == "Threshold Adjustment":
             # Set all groups to the mean outcome rate
             mean_rate = round(fixed_df["__outcome__"].mean() * 100, 2)
@@ -592,6 +663,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
                 f"the same overall outcome rate of {mean_rate:.1f}%."
             )
  
+        # ── Compute fixed metrics ─────────────────────────────────────────────
         fixed_max = fixed_rates.max()
         fixed_min = fixed_rates.min()
         fixed_dir = round(fixed_min / fixed_max, 4) if fixed_max > 0 else 1.0
@@ -599,6 +671,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
         fixed_passes_dir = fixed_dir >= 0.80
         fixed_passes_parity = fixed_parity <= 10
  
+        # ── Visual Comparison ─────────────────────────────────────────────────
         st.markdown("#### 📊 Before vs After Comparison")
  
         col_before, col_after = st.columns(2)
@@ -639,6 +712,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
                       delta="OK" if fixed_passes_parity else "High",
                       delta_color="normal")
  
+        # ── Grouped bar: side-by-side ─────────────────────────────────────────
         st.markdown("#### 📈 Side-by-Side Rate Shift")
  
         all_groups = sorted(set(outcome_rates.index) | set(fixed_rates.index))
@@ -674,6 +748,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
  
         st.plotly_chart(comparison_fig, use_container_width=True)
  
+        # ── Improvement Summary ───────────────────────────────────────────────
         st.markdown("#### ✅ Improvement Summary")
  
         dir_improvement = round((fixed_dir - dir_score) * 100, 1)
@@ -706,6 +781,7 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
             unsafe_allow_html=True
         )
  
+        # ── Download fixed dataset ────────────────────────────────────────────
         st.markdown("#### 💾 Download Fixed Dataset")
  
         # Merge fixed outcome back to original df columns
@@ -762,9 +838,17 @@ else:
         st.info("ℹ️ Fairness scoring works best with 2 groups. Multi-group support coming soon.")
 
 st.divider()
+if st.button("Show Previous Analysis"):
 
+    result = supabase.table("datasets").select("*").execute()
+
+    df_supabase = pd.DataFrame(result.data)
+
+    st.dataframe(df_supabase)
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.caption("FairLens AI · Built for SusHacks Hackathon 2026 · Bhavya Sri · Ruchitha · Tulasi Priya · Vaishnavi")
+
+
 
 
 
