@@ -6,7 +6,6 @@ import requests
 import numpy as np
 import io
 import os
-from supabase_config import supabase
 
 # Base directory — same folder as this script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -83,48 +82,7 @@ st.markdown('<div class="main-title">🧠 FairLens AI</div>', unsafe_allow_html=
 st.markdown('<div class="subtitle">AI Fairness Auditor — Detect · Explain · Fix Bias in AI Systems</div>', unsafe_allow_html=True)
 st.divider()
 
-# ─── Auth Gate ────────────────────────────────────────────────────────────────
-if "user" not in st.session_state:
-    st.session_state["user"] = None
 
-if st.session_state["user"] is None:
-    st.markdown('<div class="section-header">🔐 Sign in to continue</div>', unsafe_allow_html=True)
-    auth_tab_login, auth_tab_signup = st.tabs(["Login", "Sign Up"])
-
-    with auth_tab_login:
-        email = st.text_input("Email", key="login_email")
-        password = st.text_input("Password", type="password", key="login_password")
-        if st.button("Login", use_container_width=True):
-            try:
-                res = supabase.auth.sign_in_with_password({"email": email, "password": password})
-                st.session_state["user"] = res.user
-                st.success(f"✅ Welcome back, {email}!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ Login failed: {e}")
-
-    with auth_tab_signup:
-        email = st.text_input("Email", key="signup_email")
-        password = st.text_input("Password", type="password", key="signup_password")
-        if st.button("Create Account", use_container_width=True):
-            try:
-                res = supabase.auth.sign_up({"email": email, "password": password})
-                st.success("✅ Account created! Check your email to confirm, then log in.")
-            except Exception as e:
-                st.error(f"❌ Sign up failed: {e}")
-
-    st.stop()  # Block rest of app until logged in
-
-# Logout button in sidebar
-with st.sidebar:
-    user = st.session_state.get("user")
-    if user:
-        st.markdown(f"👤 **{user.email}**")
-        if st.button("Logout"):
-            
-            supabase.auth.sign_out()
-            st.session_state["user"] = None
-            st.rerun()
 # ─── Domain Selection ─────────────────────────────────────────────────────────
 st.markdown('<div class="section-header">Step 1 — Select Application Domain</div>', unsafe_allow_html=True)
 
@@ -189,16 +147,7 @@ with tab_upload:
         except Exception as e:
             st.error(f"❌ Error reading file: {e}")
             st.stop()
-if uploaded_file is not None:
 
-    file_bytes = uploaded_file.read()
-
-    supabase.storage.from_("datasets").upload(
-        f"{uploaded_file.name}",
-        file_bytes
-    )
-
-    st.success("Dataset uploaded to Supabase Storage")
 with tab_sample:
     SAMPLE_FILES = {
         "Biased Hiring Data":  os.path.join(BASE_DIR, "biased_recruitment_data.csv"),
@@ -387,21 +336,6 @@ if binary_outcome is not None and group_col in df.columns:
         st.metric("Statistical Parity Gap", f"{parity_diff:.1f}%", delta="≤ 10% is fair")
         st.metric("Highest Rate", f"{max_rate:.1f}%")
         st.metric("Lowest Rate", f"{min_rate:.1f}%")
-
-    if st.button("Save Analysis to Supabase"):
-        user_email = st.session_state["user"].email if st.session_state.get("user") else "Guest"
-        data = {
-            "user_name": user_email,
-            "domain": domain,
-            "group_column": group_col,
-            "outcome_column": outcome_col,
-            "fairness_score": float(dir_score),
-            "verdict": "FAIR" if passes_dir and passes_parity else "BIASED"
-        }
-
-        response = supabase.table("datasets").insert(data).execute()
-
-        st.success("Saved successfully to Supabase!")
 
     # ─── Verdict ──────────────────────────────────────────────────────────────
     st.markdown("#### 🧾 Fairness Verdict")
@@ -838,15 +772,10 @@ else:
         st.info("ℹ️ Fairness scoring works best with 2 groups. Multi-group support coming soon.")
 
 st.divider()
-if st.button("Show Previous Analysis"):
 
-    result = supabase.table("datasets").select("*").execute()
-
-    df_supabase = pd.DataFrame(result.data)
-
-    st.dataframe(df_supabase)
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.caption("FairLens AI · Built for SusHacks Hackathon 2026 · Bhavya Sri · Ruchitha · Tulasi Priya · Vaishnavi")
+
 
 
 
