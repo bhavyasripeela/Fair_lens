@@ -6,6 +6,7 @@ import requests
 import numpy as np
 import io
 import os
+from supabase import create_client
 
 # Base directory — same folder as this script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +20,79 @@ st.set_page_config(
 )
 if "df" not in st.session_state:
     st.session_state["df"] = None
+if "user" not in st.session_state:
+    st.session_state["user"] = None
+
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ─── Auth Gate ────────────────────────────────────────────────────────────────
+if st.session_state["user"] is None:
+    st.markdown('<div class="main-title">🧠 FairLens AI</div>', unsafe_allow_html=True)
+    st.markdown("### Please Login or Sign Up to begin bias Analysis")
+    
+    auth_tab1, auth_tab2 = st.tabs(["Login", "Sign Up"])
+    
+    with auth_tab1:
+        email_login = st.text_input("Email", key="login_email")
+        password_login = st.text_input("Password", type="password", key="login_pass")
+        if st.button("Login"):
+            try:
+                user = supabase.auth.sign_in_with_password({
+                    "email": email_login,
+                    "password": password_login
+                })
+                st.session_state["user"] = user
+                st.success("Logged in successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+                
+    with auth_tab2:
+        email_signup = st.text_input("Email", key="signup_email")
+        password_signup = st.text_input("Password", type="password", key="signup_pass")    
+        if st.button("Sign Up"):
+            try:
+                supabase.auth.sign_up({
+                    "email": email_signup,
+                    "password": password_signup
+                })
+                st.success("Account created! You can now log in.")
+            except Exception as e:
+                st.error(f"Sign up failed: {e}")
+                
+    st.stop()
+else:
+    # ─── Sidebar Dashboard ────────────────────────────────────────────────────────
+    # Extract email depending on how the Supabase user object is packaged
+    user_email = "User"
+    user_obj = st.session_state["user"]
+    if hasattr(user_obj, "user") and user_obj.user:
+        user_email = user_obj.user.email
+    elif isinstance(user_obj, dict) and "user" in user_obj:
+        user_email = user_obj["user"].get("email", "User")
+
+    with st.sidebar:
+        st.markdown(f"### 👋 Welcome!")
+        st.markdown(f"**{user_email}**")
+        
+        if st.button("Logout", use_container_width=True):
+            st.session_state["user"] = None
+            st.rerun()
+            
+        st.divider()
+        st.markdown("#### 🕒 Analysis History")
+        st.caption("View your previously saved fairness analyses.")
+        if st.button("Load Previous Analyses", use_container_width=True):
+            try:
+                result = supabase.table("Data").select("*").execute()
+                if result.data:
+                    st.dataframe(pd.DataFrame(result.data), use_container_width=True)
+                else:
+                    st.info("No previous analyses found.")
+            except Exception as e:
+                st.error(f"Error loading history: {e}")
 
 # ─── Helper: Reusable Bar Chart ───────────────────────────────────────────────
 def make_bar_chart(rates, title, y_label, color_seq=None):
@@ -174,7 +248,12 @@ if st.session_state["df"] is None:
     st.info("⬆️ Please upload a CSV file to begin the fairness analysis.")
     st.stop()
 
-df = st.session_state["df"]
+df = st.session_state["df"].copy()
+
+# Fill missing values in categorical columns to avoid processing errors downstream
+for col in df.select_dtypes(include=["object", "category"]).columns:
+    df[col] = df[col].fillna("Unknown").astype(str)
+
 st.success(f"✅ File uploaded successfully — {df.shape[0]} rows × {df.shape[1]} columns")
 
 with st.expander("📋 Preview Dataset", expanded=False):
@@ -715,43 +794,44 @@ Be conversational, empathetic, and specific to the numbers above. Write in flowi
             unsafe_allow_html=True
         )
  
-        # ── Download fixed dataset ────────────────────────────────────────────
-        st.markdown("#### 💾 Download Fixed Dataset")
- 
-        # Merge fixed outcome back to original df columns
-        export_df = df.copy()
-        export_df["__fixed_outcome__"] = np.nan
- 
-        if method_key in ("Oversampling", "Undersampling"):
-            # Export the resampled dataset
-            export_df = fixed_df[[group_col, "__outcome__"]].rename(
-                columns={"__outcome__": f"{outcome_col}_fixed"}
-            )
-        else:
-            # For reweighing / threshold: add weight or adjusted column
-            if method_key == "Reweighing":
-                group_sizes = analysis_df[group_col].value_counts()
-                mean_size = group_sizes.mean()
-                df["sample_weight"] = df[group_col].map(
-                    {g: round(mean_size / group_sizes[g], 4) for g in group_sizes.index}
+        if overall_fixed:
+            # ── Download fixed dataset ────────────────────────────────────────────
+            st.markdown("#### 💾 Download Fixed Dataset")
+     
+            # Merge fixed outcome back to original df columns
+            export_df = df.copy()
+            export_df["__fixed_outcome__"] = np.nan
+     
+            if method_key in ("Oversampling", "Undersampling"):
+                # Export the resampled dataset
+                export_df = fixed_df[[group_col, "__outcome__"]].rename(
+                    columns={"__outcome__": f"{outcome_col}_fixed"}
                 )
-                export_df = df
             else:
-                mean_rate = round(analysis_df["__outcome__"].mean() * 100, 2)
-                df["adjusted_threshold_rate_%"] = df[group_col].map(
-                    {g: mean_rate for g in groups}
-                )
-                export_df = df
- 
-        csv_buffer = io.StringIO()
-        export_df.to_csv(csv_buffer, index=False)
-        st.download_button(
-            label="⬇️ Download Fixed Dataset as CSV",
-            data=csv_buffer.getvalue(),
-            file_name=f"fairlens_fixed_{method_key.lower().replace(' ', '_')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )    
+                # For reweighing / threshold: add weight or adjusted column
+                if method_key == "Reweighing":
+                    group_sizes = analysis_df[group_col].value_counts()
+                    mean_size = group_sizes.mean()
+                    df["sample_weight"] = df[group_col].map(
+                        {g: round(mean_size / group_sizes[g], 4) for g in group_sizes.index}
+                    )
+                    export_df = df
+                else:
+                    mean_rate = round(analysis_df["__outcome__"].mean() * 100, 2)
+                    df["adjusted_threshold_rate_%"] = df[group_col].map(
+                        {g: mean_rate for g in groups}
+                    )
+                    export_df = df
+     
+            csv_buffer = io.StringIO()
+            export_df.to_csv(csv_buffer, index=False)
+            st.download_button(
+                label="⬇️ Download Fixed Dataset as CSV",
+                data=csv_buffer.getvalue(),
+                file_name=f"fairlens_fixed_{method_key.lower().replace(' ', '_')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )    
 else:    
     st.warning(
         f"⚠️ Could not compute outcome-based fairness for column `{outcome_col}`. "
@@ -772,9 +852,10 @@ else:
         st.info("ℹ️ Fairness scoring works best with 2 groups. Multi-group support coming soon.")
 
 st.divider()
-
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.caption("FairLens AI · Built for SusHacks Hackathon 2026 · Bhavya Sri · Ruchitha · Tulasi Priya · Vaishnavi")
+
+
 
 
 
