@@ -79,13 +79,15 @@ Explains whether the dataset is fair or biased and why.
 Applies techniques like:
 
 - Oversampling
-- Downsampling
+- Undersampling
+- Reweighing
+- Threshold Adjustment
 
 ### 📈 Before vs After Comparison
 Shows fairness improvement after mitigation.
 
 ### 📄 Report Generation
-Provides a clear fairness report.
+Provides a clear fairness report for the fixed bias.
 
 ---
 
